@@ -3,11 +3,290 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RoorkeeTimes</title>
+    <title>RoorkeeTimes Admin Portal</title>
     <!-- Load Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Load Inter font -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&display=swap" rel="stylesheet">
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, collection, addDoc, setDoc, getDoc, deleteDoc, onSnapshot, query, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase Configuration ---
+        // These global variables are provided by the environment.
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, auth, db, userId;
+        let articlesColPath = '';
+
+        // --- DOM Elements ---
+        const authStatus = document.getElementById('auth-status');
+        const adminPanel = document.getElementById('admin-panel');
+        const articleForm = document.getElementById('article-form');
+        const articleFormTitle = document.getElementById('article-form-title');
+        const articleFormButton = document.getElementById('article-form-button');
+        const cancelEditButton = document.getElementById('cancel-edit-btn');
+        const topStoryContainer = document.getElementById('top-story-container');
+        const secondaryArticlesContainer = document.getElementById('secondary-articles-container');
+
+        // --- Firebase Initialization & Auth ---
+        async function initFirebase() {
+            try {
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                setLogLevel('Debug');
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        authStatus.textContent = `Logged In (User: ${userId.substring(0, 6)}...)`;
+                        // Define the public path for articles
+                        articlesColPath = `/artifacts/${appId}/public/data/articles`;
+                        adminPanel.classList.remove('hidden');
+                        loadArticles();
+                    } else {
+                        // No user, attempt to sign in.
+                        authStatus.textContent = 'Logging in...';
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (error) {
+                            console.error('Error signing in:', error);
+                            authStatus.textContent = 'Login Failed';
+                        }
+                    }
+                });
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                authStatus.textContent = 'Firebase Init Failed';
+            }
+        }
+
+        // --- Firestore CRUD ---
+
+        // 1. Load Articles (Real-time)
+        function loadArticles() {
+            if (!db || !articlesColPath) return;
+
+            const q = query(collection(db, articlesColPath));
+            
+            onSnapshot(q, (querySnapshot) => {
+                const articles = [];
+                querySnapshot.forEach((doc) => {
+                    articles.push({ id: doc.id, ...doc.data() });
+                });
+
+                // Sort by createdAt timestamp, newest first. Handle null timestamps.
+                articles.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+                renderArticles(articles);
+            }, (error) => {
+                console.error("Error loading articles: ", error);
+            });
+        }
+
+        // 2. Render Articles to DOM
+        function renderArticles(articles) {
+            // Clear existing content
+            topStoryContainer.innerHTML = '';
+            secondaryArticlesContainer.innerHTML = '';
+
+            if (articles.length === 0) {
+                topStoryContainer.innerHTML = '<p class="text-gray-500">No articles found. Add one using the admin panel!</p>';
+                return;
+            }
+
+            // Render Top Story (first article)
+            const topStory = articles[0];
+            if (topStory) {
+                topStoryContainer.innerHTML = createArticleCardHTML(topStory, 'top');
+            }
+
+            // Render Secondary Stories (the rest)
+            const secondaryArticles = articles.slice(1);
+            if (secondaryArticles.length > 0) {
+                secondaryArticlesContainer.innerHTML = secondaryArticles.map(article => createArticleCardHTML(article, 'secondary')).join('');
+            } else {
+                secondaryArticlesContainer.innerHTML = '<p class="text-gray-500 col-span-2">No more articles available.</p>';
+            }
+        }
+
+        // 3. Create HTML for a single article card
+        function createArticleCardHTML(article, type) {
+            const isTopStory = type === 'top';
+            const imageUrl = article.imageUrl || 'https://placehold.co/800x450/3498db/ffffff?text=News+Image';
+            
+            // Different layout for top story
+            if (isTopStory) {
+                return `
+                <article class="news-card mb-6" data-id="${article.id}">
+                    <img src="${imageUrl}" alt="Top story image" class="w-full h-96 object-cover">
+                    <div class="p-6">
+                        <span class="category-tag">${article.category || 'News'}</span>
+                        <h1 class="text-3xl lg:text-4xl font-bold text-gray-900 my-3 leading-tight hover:text-blue-700">
+                            <a href="#">${article.title || 'Untitled Article'}</a>
+                        </h1>
+                        <p class="text-gray-700 text-lg mb-4">
+                            ${article.excerpt || ''}
+                        </p>
+                        <div class="text-sm text-gray-500">
+                            By <span class="font-medium text-gray-800">${article.author || 'Staff'}</span> | ${new Date(article.createdAt?.toDate()).toLocaleString()}
+                        </div>
+                        <!-- Admin Buttons -->
+                        <div class="p-4 border-t border-gray-200 mt-4 flex gap-2">
+                            <button class="edit-btn text-sm bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-md shadow-sm transition duration-200">Edit</button>
+                            <button class="delete-btn text-sm bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded-md shadow-sm transition duration-200">Delete</button>
+                        </div>
+                    </div>
+                </article>
+                `;
+            }
+
+            // Layout for secondary stories
+            return `
+            <article class="news-card" data-id="${article.id}">
+                <img src="${imageUrl.replace('800x450', '600x400')}" alt="News image">
+                <div class="news-card-content">
+                    <span class="category-tag">${article.category || 'News'}</span>
+                    <h2 class="news-card-title">
+                        <a href="#">${article.title || 'Untitled Article'}</a>
+                    </h2>
+                    <p class="news-card-excerpt">
+                        ${article.excerpt || ''}
+                    </p>
+                    <div class="news-card-meta">
+                        <span>${new Date(article.createdAt?.toDate()).toLocaleString()}</span>
+                    </div>
+                    <!-- Admin Buttons -->
+                    <div class="p-4 border-t border-gray-200 mt-4 flex gap-2">
+                        <button class="edit-btn text-sm bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-md shadow-sm transition duration-200">Edit</button>
+                        <button class="delete-btn text-sm bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded-md shadow-sm transition duration-200">Delete</button>
+                    </div>
+                </div>
+            </article>
+            `;
+        }
+
+        // 4. Handle Form Submit (Add or Edit)
+        async function handleFormSubmit(e) {
+            e.preventDefault();
+            const form = e.target;
+            const articleId = form.dataset.id;
+
+            const articleData = {
+                title: form.title.value,
+                excerpt: form.excerpt.value,
+                imageUrl: form.imageUrl.value,
+                category: form.category.value,
+                author: form.author.value,
+            };
+
+            try {
+                if (articleId) {
+                    // Update existing article
+                    const docRef = doc(db, articlesColPath, articleId);
+                    await setDoc(docRef, articleData, { merge: true });
+                } else {
+                    // Add new article
+                    articleData.createdAt = serverTimestamp(); // Add timestamp
+                    await addDoc(collection(db, articlesColPath), articleData);
+                }
+                resetForm();
+            } catch (error) {
+                console.error("Error saving article: ", error);
+            }
+        }
+
+        // 5. Handle Edit Button Click (Populate Form)
+        async function handleEditClick(e) {
+            const card = e.target.closest('.news-card');
+            if (!card) return;
+            const articleId = card.dataset.id;
+            
+            try {
+                const docRef = doc(db, articlesColPath, articleId);
+                const docSnap = await getDoc(docRef);
+
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    const form = articleForm;
+                    form.title.value = data.title || '';
+                    form.excerpt.value = data.excerpt || '';
+                    form.imageUrl.value = data.imageUrl || '';
+                    form.category.value = data.category || '';
+                    form.author.value = data.author || '';
+                    
+                    form.dataset.id = articleId; // Set ID for edit mode
+                    
+                    // Update UI for editing
+                    articleFormTitle.textContent = 'Edit Article';
+                    articleFormButton.textContent = 'Update Article';
+                    cancelEditButton.classList.remove('hidden');
+                    
+                    // Scroll to form
+                    adminPanel.scrollIntoView({ behavior: 'smooth' });
+
+                } else {
+                    console.error("No such document to edit!");
+                }
+            } catch (error) {
+                console.error("Error fetching doc for edit: ", error);
+            }
+        }
+
+        // 6. Handle Delete Button Click
+        async function handleDeleteClick(e) {
+            const card = e.target.closest('.news-card');
+            if (!card) return;
+            const articleId = card.dataset.id;
+
+            // Bypassing window.confirm as per instructions.
+            // In a real app, a custom modal confirmation would be ideal.
+            try {
+                await deleteDoc(doc(db, articlesColPath, articleId));
+                // Snapshot listener will auto-update the UI
+            } catch (error) {
+                console.error("Error deleting document: ", error);
+            }
+        }
+        
+        // 7. Reset Form
+        function resetForm() {
+            articleForm.reset();
+            articleForm.dataset.id = '';
+            articleFormTitle.textContent = 'Add New Article';
+            articleFormButton.textContent = 'Add Article';
+            cancelEditButton.classList.add('hidden');
+        }
+
+        // --- Event Listeners ---
+        document.addEventListener('DOMContentLoaded', () => {
+            initFirebase();
+            
+            articleForm.addEventListener('submit', handleFormSubmit);
+            cancelEditButton.addEventListener('click', resetForm);
+
+            // Event delegation for edit/delete buttons
+            const mainContent = document.getElementById('main-content');
+            mainContent.addEventListener('click', (e) => {
+                if (e.target.classList.contains('edit-btn')) {
+                    handleEditClick(e);
+                }
+                if (e.target.classList.contains('delete-btn')) {
+                    handleDeleteClick(e);
+                }
+            });
+        });
+
+    </script>
     <style>
         body {
             font-family: 'Inter', sans-serif;
@@ -54,6 +333,17 @@
         .category-tag {
             @apply text-xs font-semibold text-blue-600 uppercase;
         }
+        
+        /* Admin Panel Styles */
+        .admin-form-input {
+            @apply w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500;
+        }
+        .admin-form-label {
+            @apply block text-sm font-medium text-gray-700 mb-1;
+        }
+        .admin-form-button {
+            @apply py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white transition duration-200;
+        }
     </style>
 </head>
 <body class="bg-gray-100">
@@ -72,6 +362,9 @@
                     </a>
                 </div>
                 <div>
+                    <!-- Auth Status -->
+                    <span classs="text-sm text-gray-500" id="auth-status">Initializing...</span>
+                    
                     <button class="md:hidden p-2 rounded-md text-gray-700" id="menu-toggle">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7" />
@@ -106,112 +399,65 @@
         <a href="#" class="block nav-link text-center">Events</a>
     </div>
 
-    <!-- Breaking News Banner -->
+    <!-- Admin Panel (Hidden by default) -->
+    <section id="admin-panel" class="hidden container mx-auto mt-6 p-6 bg-white rounded-lg shadow-md">
+        <h2 id="article-form-title" class="text-2xl font-bold text-gray-900 mb-4">Add New Article</h2>
+        <form id="article-form" class="space-y-4" data-id="">
+            <div>
+                <label for="title" class="admin-form-label">Title</label>
+                <input type="text" id="title" name="title" class="admin-form-input" required>
+            </div>
+            <div>
+                <label for="excerpt" class="admin-form-label">Excerpt (Short Description)</label>
+                <textarea id="excerpt" name="excerpt" rows="3" class="admin-form-input"></textarea>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                    <label for="imageUrl" class="admin-form-label">Image URL</label>
+                    <input type="text" id="imageUrl" name="imageUrl" class="admin-form-input" placeholder="https://placehold.co/800x450/...">
+                </div>
+                 <div>
+                    <label for="category" class="admin-form-label">Category</label>
+                    <input type="text" id="category" name="category" class="admin-form-input" placeholder="e.g., Innovation, Campus">
+                </div>
+                 <div>
+                    <label for="author" class="admin-form-label">Author</label>
+                    <input type="text" id="author" name="author" class="admin-form-input" placeholder="e.g., R. K. Sharma">
+                </div>
+            </div>
+            <div class="flex gap-4">
+                <button id="article-form-button" type="submit" class="admin-form-button bg-blue-600 hover:bg-blue-700">Add Article</button>
+                <button id="cancel-edit-btn" type="button" class="admin-form-button bg-gray-500 hover:bg-gray-600 hidden">Cancel Edit</button>
+            </div>
+        </form>
+    </section>
+
+    <!-- Breaking News Banner (Static) -->
     <div class="breaking-banner container mx-auto mt-4 rounded-lg overflow-hidden">
         <span>BREAKING</span>
         <p class="animate-pulse">IIT Roorkee team announces breakthrough in clean energy research...</p>
     </div>
 
-    <!-- Main Content Grid -->
-    <main class="container mx-auto px-4 mt-6">
+    <!-- Main Content Grid (Now Dynamic) -->
+    <main id="main-content" class="container mx-auto px-4 mt-6">
         <div class="flex flex-wrap lg:flex-nowrap gap-6">
 
             <!-- Main Stories (2/3 width) -->
             <div class="w-full lg:w-2/3">
-                <!-- Top Story -->
-                <article class="news-card mb-6">
-                    <img src="https://placehold.co/800x450/3498db/ffffff?text=IIT+Roorkee+Campus" alt="Top story image">
-                    <div class="p-6">
-                        <span class="category-tag">Innovation</span>
-                        <h1 class="text-3xl lg:text-4xl font-bold text-gray-900 my-3 leading-tight hover:text-blue-700">
-                            <a href="#">IIT Roorkee Develops New Low-Cost Water Purification Tech for Rural Areas</a>
-                        </h1>
-                        <p class="text-gray-700 text-lg mb-4">
-                            A team of researchers from the Civil Engineering department has patented a new filtration system that could provide clean drinking water to millions.
-                        </p>
-                        <div class="text-sm text-gray-500">
-                            By <span class="font-medium text-gray-800">R. K. Sharma</span> | 2 hours ago
-                        </div>
-                    </div>
-                </article>
-
-                <!-- Secondary Stories Grid -->
-                <div class="grid md:grid-cols-2 gap-6">
-                    <!-- Story 1 -->
-                    <article class="news-card">
-                        <img src="https://placehold.co/600x400/9b59b6/ffffff?text=Solani+Aqueduct" alt="News image">
-                        <div class="news-card-content">
-                            <span class="category-tag">City News</span>
-                            <h2 class="news-card-title">
-                                <a href="#">Solani Aqueduct Park Beautification Project Begins</a>
-                            </h2>
-                            <p class="news-card-excerpt">
-                                The local administration has started the first phase of the park's renovation, promising new lighting and seating areas.
-                            </p>
-                            <div class="news-card-meta">
-                                <span>4 hours ago</span>
-                                <span>3 min read</span>
-                            </div>
-                        </div>
-                    </article>
-                    
-                    <!-- Story 2 -->
-                    <article class="news-card">
-                        <img src="https://placehold.co/600x400/e67e22/ffffff?text=Roorkee+Market" alt="News image">
-                        <div class="news-card-content">
-                            <span class="category-tag">Business</span>
-                            <h2 class="news-card-title">
-                                <a href="#">New Co-Working Space Opens Near Civil Lines, Targets Startups</a>
-                            </h2>
-                            <p class="news-card-excerpt">
-                                'Innovate Hub' aims to provide a collaborative environment for the growing number of student-led startups in the city.
-                            </p>
-                            <div class="news-card-meta">
-                                <span>6 hours ago</span>
-                                <span>2 min read</span>
-                            </div>
-                        </div>
-                    </article>
-                    
-                    <!-- Story 3 -->
-                    <article class="news-card">
-                        <img src="https://placehold.co/600x400/2ecc71/ffffff?text=Student+Life" alt="News image">
-                        <div class="news-card-content">
-                            <span class="category-tag">Student Life</span>
-                            <h2 class="news-card-title">
-                                <a href="#">'Cognizance' 2026 Dates Announced: Asia's Largest Tech Fest Returns</a>
-                            </h2>
-                            <p class="news-card-excerpt">
-                                IIT Roorkee's annual technical festival is set for March 15-17, promising a bigger lineup of events and guest speakers.
-                            </p>
-                            <div class="news-card-meta">
-                                <span>1 day ago</span>
-                                <span>4 min read</span>
-                            </div>
-                        </div>
-                    </article>
-                    
-                    <!-- Story 4 -->
-                    <article class="news-card">
-                        <img src="https://placehold.co/600x400/e74c3c/ffffff?text=Traffic+Jam" alt="News image">
-                        <div class="news-card-content">
-                            <span class="category-tag">Infrastructure</span>
-                            <h2 class="news-card-title">
-                                <a href="#">Citizens Raise Concerns Over Frequent Traffic Jams at Haridwar Road</a>
-                            </h2>
-                            <p class="news-card-excerpt">
-                                With the festive season approaching, residents demand better traffic management from the local police.
-                            </p>
-                            <div class="news-card-meta">
-                                <span>1 day ago</span>
-                                <span>3 min read</span>
-                            </div>
-                        </div>
-                    </article>
+                
+                <!-- Top Story (Dynamic) -->
+                <div id="top-story-container">
+                    <!-- Articles will be injected here by JS -->
                 </div>
+
+                <!-- Secondary Stories Grid (Dynamic) -->
+                <div id="secondary-articles-container" class="grid md:grid-cols-2 gap-6">
+                    <!-- Articles will be injected here by JS -->
+                </div>
+
             </div>
 
-            <!-- Sidebar (1/3 width) -->
+            <!-- Sidebar (1/3 width) (Static) -->
             <aside class="w-full lg:w-1/3 space-y-6">
                 <!-- Trending Section -->
                 <div class="bg-white p-6 rounded-lg shadow-md">
@@ -310,12 +556,13 @@
         </div>
     </footer>
 
+    <!-- Static JS (Date, Year, Mobile Menu) -->
     <script>
         // Set current date
         const dateElement = document.getElementById('current-date');
         const now = new Date();
         const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
-        dateElement.textContent = now.toLocaleDateString('en-US', options) + ' | ' + 'Roorkee, IN';
+        dateElement.textContent = now.toLocaleDateString('en-US', options) + ' | 'Roorkee, IN';
 
         // Set current year in footer
         document.getElementById('current-year').textContent = now.getFullYear();
@@ -330,3 +577,4 @@
 
 </body>
 </html>
+
